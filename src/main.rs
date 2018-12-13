@@ -1,22 +1,55 @@
 #![no_std]
 #![no_main]
 
-// pick a panicking behavior
-extern crate panic_halt; // you can put a breakpoint on `rust_begin_unwind` to catch panics
-// extern crate panic_abort; // requires nightly
-// extern crate panic_itm; // logs messages over ITM; requires ITM support
-// extern crate panic_semihosting; // logs messages to the host stderr; requires a debugger
-
-use cortex_m_rt::entry;
+use core::panic::PanicInfo;
+use core::sync::atomic::{self, Ordering};
 
 // MAGIC
 const RCC_BORDER: usize = 0x4002_1000;
 const RCC_APB2ENR: *mut usize = (RCC_BORDER + 0x18usize) as *mut usize;
 const GPIOB_BORDER: usize = 0x4001_0C00usize;
 const GPIOB_CRH: *mut usize = (GPIOB_BORDER + 0x04usize) as *mut usize;
-const GPIOB_ODR: *mut usize = (GPIOB_BORDER + 0x0Cusize) as *mut usize;
+const GPIOB_BSRR: *mut usize = (GPIOB_BORDER + 0x10usize) as *mut usize;
 
-#[entry]
+#[inline(never)]
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {
+        atomic::compiler_fence(Ordering::SeqCst);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Reset() -> ! {
+    use core::ptr;
+
+    extern "C" {
+        static mut _sbss: u8;
+        static mut _ebss: u8;
+
+        static mut _sdata: u8;
+        static mut _edata: u8;
+        static _sidata: u8;
+    }
+
+    let count = &_ebss as *const u8 as usize - &_sbss as *const u8 as usize;
+    ptr::write_bytes(&mut _sbss as *mut u8, 0, count);
+
+    let count = &_edata as *const u8 as usize - &_sdata as *const u8 as usize;
+    ptr::copy_nonoverlapping(&_sidata as *const u8, &mut _sdata as *mut u8, count);
+
+    extern "Rust" {
+        fn main() -> !;
+    }
+
+    main();
+}
+
+#[link_section = ".vector_table.reset_vector"]
+#[no_mangle]
+pub static RESET_VECTOR: unsafe extern "C" fn() -> ! = Reset;
+
+#[no_mangle]
 fn main() -> ! {
     use core::ptr::write_volatile;
 
@@ -25,12 +58,18 @@ fn main() -> ! {
         write_volatile(GPIOB_CRH, *GPIOB_CRH ^ (0b0110 << ((12 - 8) * 4)));
     }
 
+    let mut led = true;
     loop {
         for i in 0..10000 {
             if i == 0 {
                 unsafe {
-                    write_volatile(GPIOB_ODR, *GPIOB_ODR ^ 1 << 12);
+                    if led {
+                        write_volatile(GPIOB_BSRR, *GPIOB_BSRR ^ 1 << 12);
+                    } else {
+                        write_volatile(GPIOB_BSRR, *GPIOB_BSRR ^ 1 << (12 + 16));
+                    }
                 }
+                led = !led;
             }
         }
     }
